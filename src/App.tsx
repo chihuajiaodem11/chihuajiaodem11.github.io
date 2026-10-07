@@ -318,9 +318,11 @@ const App = () => {
   const updatePomodoroTask = (task: string) => setState((current) => ({ ...current, pomodoro: { ...current.pomodoro, task } }))
 
   const startStopwatch = () => {
+    const startedAt = Date.now()
+    setNow(startedAt)
     setState((current) => {
       if (current.stopwatch.running) return current
-      return { ...current, stopwatch: { ...current.stopwatch, running: true, startedAt: Date.now() } }
+      return { ...current, stopwatch: { ...current.stopwatch, running: true, startedAt } }
     })
   }
 
@@ -350,6 +352,8 @@ const App = () => {
   }))
 
   const startPomodoro = () => {
+    const startedAt = Date.now()
+    setNow(startedAt)
     setState((current) => {
       const pomodoro = current.pomodoro
       if (pomodoro.running) return current
@@ -359,8 +363,8 @@ const App = () => {
         pomodoro: {
           ...pomodoro,
           running: true,
-          endAt: Date.now() + duration * 1000,
-          focusStartedAt: pomodoro.phase === 'focus' ? (pomodoro.focusStartedAt ?? Date.now()) : pomodoro.focusStartedAt,
+          endAt: startedAt + duration * 1000,
+          focusStartedAt: pomodoro.phase === 'focus' ? (pomodoro.focusStartedAt ?? startedAt) : pomodoro.focusStartedAt,
         },
       }
     })
