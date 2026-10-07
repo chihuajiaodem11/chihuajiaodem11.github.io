@@ -445,7 +445,12 @@ const App = () => {
     setAuthMessage('')
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { shouldCreateUser: true },
+      options: {
+        shouldCreateUser: true,
+        // Supabase falls back to its dashboard Site URL when this is omitted.
+        // Explicitly use the current site so production emails never point to localhost.
+        emailRedirectTo: window.location.origin,
+      },
     })
     setAuthBusy(false)
 
@@ -455,7 +460,7 @@ const App = () => {
     }
 
     setAuthStep('code')
-    setAuthMessage('验证码已发送，请检查邮箱。')
+    setAuthMessage('验证码已发送，请检查邮箱；如果邮件显示确认链接，也可以直接点击链接。')
   }
 
   const verifyAuthCode = async (event: FormEvent<HTMLFormElement>) => {
