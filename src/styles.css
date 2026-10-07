@@ -31,6 +31,24 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .today-summary strong { color: var(--accent-strong); font-size: 14px; font-weight: 650; }
 .today-summary small { color: var(--muted); font-size: 11px; font-weight: 500; }
 .compact-summary { padding-left: 24px; border-left: 1px solid var(--border); }
+.auth-control { position: relative; }
+.sync-button { min-height: 34px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 7px; padding: 0 10px; color: var(--muted); background: transparent; font-size: 12px; transition: color .2s ease, border-color .2s ease, background .2s ease; }
+.sync-button:hover, .sync-button.connected { color: var(--accent-strong); border-color: var(--border-strong); background: var(--accent-wash); }
+.sync-dot { width: 6px; height: 6px; display: inline-block; flex: 0 0 auto; border-radius: 999px; background: var(--faint); }
+.sync-dot.active { background: var(--success); box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 14%, transparent); }
+.sync-dot.error { background: var(--danger); }
+.auth-popover { position: absolute; z-index: 20; top: calc(100% + 10px); right: 0; width: min(330px, calc(100vw - 28px)); padding: 16px; border: 1px solid var(--border-strong); border-radius: 9px; color: var(--text); background: var(--panel); box-shadow: var(--shadow); }
+.auth-popover-title { margin: 0; color: var(--text); font-size: 13px; font-weight: 650; }
+.auth-popover-copy { margin: 7px 0 13px; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.auth-popover-status { display: flex; align-items: center; gap: 8px; margin: 0 0 13px; color: var(--muted); font-size: 12px; }
+.auth-form { display: grid; gap: 10px; }
+.auth-form label { display: grid; gap: 6px; }
+.auth-form label span { color: var(--muted); font-size: 11px; }
+.auth-form input { width: 100%; border: 1px solid var(--border); outline: none; color: var(--text); background: var(--panel-soft); border-radius: 6px; padding: 10px 11px; font-size: 13px; }
+.auth-form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.auth-form input:disabled { opacity: .65; }
+.auth-submit { width: 100%; margin-top: 2px; }
+.auth-message { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .icon-button, .small-icon-button { display: grid; place-items: center; border: 1px solid var(--border); color: var(--muted); background: transparent; transition: border-color .2s ease, color .2s ease, background .2s ease; }
 .icon-button { width: 36px; height: 36px; border-radius: 8px; }
 .icon-button:hover, .small-icon-button:hover { color: var(--text); border-color: var(--border-strong); background: var(--accent-wash); }

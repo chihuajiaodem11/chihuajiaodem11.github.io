@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
+import type { Session } from '@supabase/supabase-js'
+import { supabase } from './supabase'
 
 type Theme = 'dark' | 'light'
 type TimerMode = 'stopwatch' | 'pomodoro'
@@ -59,6 +61,7 @@ interface AppState {
 }
 
 const STORAGE_KEY = 'focusboard-state-v1'
+const CLOUD_TABLE = 'focusboard_data'
 const POMODORO_PRESETS = [
   { label: '15 / 5', focus: 15, rest: 5 },
   { label: '25 / 5', focus: 25, rest: 5 },
@@ -171,6 +174,14 @@ const readState = (): AppState => {
   }
 }
 
+const hasMeaningfulData = (candidate: AppState) =>
+  candidate.todos.length > 0 ||
+  Object.keys(candidate.stats).length > 0 ||
+  candidate.stopwatch.elapsedSeconds > 0 ||
+  candidate.stopwatch.task.trim().length > 0 ||
+  candidate.pomodoro.task.trim().length > 0 ||
+  candidate.pomodoro.remainingSeconds !== candidate.pomodoro.focusMinutes * 60
+
 const formatClock = (seconds: number, showHours = true) => {
   const safeSeconds = Math.max(0, Math.floor(seconds))
   const hours = Math.floor(safeSeconds / 3600)
@@ -254,11 +265,116 @@ const App = () => {
   const [editingTodoTitle, setEditingTodoTitle] = useState('')
   const [customFocus, setCustomFocus] = useState(() => String(state.pomodoro.focusMinutes))
   const [customBreak, setCustomBreak] = useState(() => String(state.pomodoro.breakMinutes))
+  const [session, setSession] = useState<Session | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+  const [cloudHydrated, setCloudHydrated] = useState(false)
+  const [cloudStatus, setCloudStatus] = useState<'checking' | 'signed-out' | 'syncing' | 'synced' | 'error'>('checking')
+  const [authOpen, setAuthOpen] = useState(false)
+  const [authStep, setAuthStep] = useState<'email' | 'code'>('email')
+  const [authEmail, setAuthEmail] = useState('')
+  const [authCode, setAuthCode] = useState('')
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authMessage, setAuthMessage] = useState('')
+  const latestStateRef = useRef(state)
+  const syncTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
+    latestStateRef.current = state
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
     document.documentElement.style.colorScheme = state.theme
   }, [state])
+
+  useEffect(() => {
+    let active = true
+    void supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
+      if (!active) return
+      setSession(currentSession)
+      setAuthReady(true)
+    })
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!active) return
+      setSession(nextSession)
+      setAuthReady(true)
+      if (!nextSession) {
+        setCloudHydrated(true)
+        setCloudStatus('signed-out')
+      }
+    })
+
+    return () => {
+      active = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!authReady) return
+    if (!session) {
+      setCloudHydrated(true)
+      setCloudStatus('signed-out')
+      return
+    }
+
+    let cancelled = false
+    setCloudHydrated(false)
+    setCloudStatus('syncing')
+
+    void (async () => {
+      const { data: remoteRow, error } = await supabase
+        .from(CLOUD_TABLE)
+        .select('data')
+        .eq('user_id', session.user.id)
+        .maybeSingle()
+
+      if (cancelled) return
+      if (error) {
+        setCloudStatus('error')
+        setCloudHydrated(true)
+        return
+      }
+
+      if (remoteRow?.data) {
+        const remoteState = normalizeState(remoteRow.data)
+        latestStateRef.current = remoteState
+        setState(remoteState)
+      } else if (hasMeaningfulData(latestStateRef.current)) {
+        await supabase.from(CLOUD_TABLE).upsert({
+          user_id: session.user.id,
+          data: latestStateRef.current,
+          updated_at: new Date().toISOString(),
+        })
+      }
+
+      if (!cancelled) {
+        setCloudHydrated(true)
+        setCloudStatus('synced')
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [authReady, session?.user.id])
+
+  useEffect(() => {
+    if (!authReady || !session || !cloudHydrated) return
+    if (syncTimerRef.current) window.clearTimeout(syncTimerRef.current)
+    setCloudStatus('syncing')
+    syncTimerRef.current = window.setTimeout(() => {
+      void supabase.from(CLOUD_TABLE).upsert({
+        user_id: session.user.id,
+        data: state,
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        setCloudStatus(error ? 'error' : 'synced')
+      })
+    }, 700)
+
+    return () => {
+      if (syncTimerRef.current) window.clearTimeout(syncTimerRef.current)
+    }
+  }, [authReady, cloudHydrated, session?.user.id, state])
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 1000)
@@ -316,6 +432,61 @@ const App = () => {
 
   const updateStopwatchTask = (task: string) => setState((current) => ({ ...current, stopwatch: { ...current.stopwatch, task } }))
   const updatePomodoroTask = (task: string) => setState((current) => ({ ...current, pomodoro: { ...current.pomodoro, task } }))
+
+  const sendAuthCode = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const email = authEmail.trim()
+    if (!email) {
+      setAuthMessage('请先输入邮箱地址。')
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthMessage('')
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true },
+    })
+    setAuthBusy(false)
+
+    if (error) {
+      setAuthMessage(error.message)
+      return
+    }
+
+    setAuthStep('code')
+    setAuthMessage('验证码已发送，请检查邮箱。')
+  }
+
+  const verifyAuthCode = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const email = authEmail.trim()
+    const token = authCode.trim().replace(/\s/g, '')
+    if (!email || !token) {
+      setAuthMessage('请输入邮箱和验证码。')
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthMessage('')
+    const { error } = await supabase.auth.verifyOtp({ email, token, type: 'email' })
+    setAuthBusy(false)
+
+    if (error) {
+      setAuthMessage(error.message)
+      return
+    }
+
+    setAuthOpen(false)
+    setAuthStep('email')
+    setAuthCode('')
+    setAuthMessage('')
+  }
+
+  const signOut = async () => {
+    await supabase.auth.signOut()
+    setAuthOpen(false)
+  }
 
   const startStopwatch = () => {
     const startedAt = Date.now()
@@ -482,6 +653,15 @@ const App = () => {
   const isStopwatchRunning = state.stopwatch.running
   const isPomodoroRunning = state.pomodoro.running
   const activeModeLabel = state.mode === 'stopwatch' ? '正计时' : state.pomodoro.phase === 'focus' ? '专注中' : '休息中'
+  const cloudStatusLabel = !authReady
+    ? '连接中'
+    : !session
+      ? '仅本机'
+      : cloudStatus === 'error'
+        ? '同步异常'
+        : cloudStatus === 'syncing'
+          ? '同步中'
+          : '已同步'
 
   return (
     <div className={`app-shell ${state.theme === 'light' ? 'theme-light' : 'theme-dark'}`}>
@@ -501,6 +681,37 @@ const App = () => {
           <div className="today-summary compact-summary">
             <span>番茄钟</span>
             <strong>{todayStats.pomodoros}<small> 个</small></strong>
+          </div>
+          <div className="auth-control">
+            <button className={session ? 'sync-button connected' : 'sync-button'} type="button" onClick={() => setAuthOpen((open) => !open)}>
+              <span className={`sync-dot ${session ? 'active' : ''}`} />{cloudStatusLabel}
+            </button>
+            {authOpen && <div className="auth-popover">
+              {session ? (
+                <>
+                  <p className="auth-popover-title">云端同步已开启</p>
+                  <p className="auth-popover-copy">{session.user.email}</p>
+                  <p className="auth-popover-status"><span className={`sync-dot ${cloudStatus === 'error' ? 'error' : 'active'}`} />{cloudStatusLabel}</p>
+                  <button className="text-action" type="button" onClick={signOut}>退出登录</button>
+                </>
+              ) : (
+                <form className="auth-form" onSubmit={authStep === 'email' ? sendAuthCode : verifyAuthCode}>
+                  <p className="auth-popover-title">邮箱验证码登录</p>
+                  <p className="auth-popover-copy">登录后，待办、统计和计时状态会在设备间同步。</p>
+                  <label>
+                    <span>邮箱地址</span>
+                    <input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="name@example.com" autoComplete="email" disabled={authStep === 'code'} />
+                  </label>
+                  {authStep === 'code' && <label>
+                    <span>邮箱验证码</span>
+                    <input inputMode="numeric" autoComplete="one-time-code" value={authCode} onChange={(event) => setAuthCode(event.target.value)} placeholder="输入验证码" maxLength={8} autoFocus />
+                  </label>}
+                  {authMessage && <p className="auth-message">{authMessage}</p>}
+                  <button className="primary-button auth-submit" type="submit" disabled={authBusy}>{authBusy ? '处理中…' : authStep === 'email' ? '发送验证码' : '验证并同步'}</button>
+                  {authStep === 'code' && <button className="text-action" type="button" onClick={() => { setAuthStep('email'); setAuthCode(''); setAuthMessage('') }}>更换邮箱</button>}
+                </form>
+              )}
+            </div>}
           </div>
           <button className="icon-button" type="button" onClick={toggleTheme} aria-label="切换主题" title="切换主题">
             <Icon name={state.theme === 'dark' ? 'sun' : 'moon'} size={18} />
@@ -652,7 +863,7 @@ const App = () => {
               <p className="section-label">今天的进度</p>
               <h2>专注统计</h2>
             </div>
-            <span className="panel-kicker">数据保存在当前设备</span>
+            <span className="panel-kicker">{session ? `已登录 · ${cloudStatusLabel}` : '未登录 · 仅保存在当前设备'}</span>
           </div>
           <div className="stats-layout">
             <div className="stat-cards">
