@@ -4,6 +4,7 @@ import type { Session } from '@supabase/supabase-js'
 import { supabase } from './supabase'
 
 type Theme = 'dark' | 'light'
+type Palette = 'slate' | 'blue' | 'rose' | 'green'
 type TimerMode = 'stopwatch' | 'pomodoro'
 type PomoPhase = 'focus' | 'break'
 type Priority = 'low' | 'medium' | 'high'
@@ -60,6 +61,7 @@ interface PomodoroState {
 interface AppState {
   version: 1
   theme: Theme
+  palette: Palette
   mode: TimerMode
   stopwatch: StopwatchState
   pomodoro: PomodoroState
@@ -74,6 +76,13 @@ const POMODORO_PRESETS = [
   { label: '25 / 5', focus: 25, rest: 5 },
   { label: '50 / 10', focus: 50, rest: 10 },
 ]
+const PALETTE_OPTIONS: Array<{ id: Palette; label: string; description: string }> = [
+  { id: 'slate', label: '石墨蓝', description: '沉稳克制' },
+  { id: 'blue', label: '雾蓝白', description: '清爽专注' },
+  { id: 'rose', label: '玫瑰白', description: '柔和清晰' },
+  { id: 'green', label: '松雾绿', description: '自然平静' },
+]
+const isPalette = (value: unknown): value is Palette => PALETTE_OPTIONS.some((option) => option.id === value)
 
 const createDayStats = (): DayStats => ({ focusSeconds: 0, pomodoros: 0, sessions: [] })
 
@@ -121,6 +130,7 @@ const normalizeFocusPeriods = (candidate: unknown): FocusPeriod[] => {
 const createDefaultState = (): AppState => ({
   version: 1,
   theme: 'dark',
+  palette: 'slate',
   mode: 'stopwatch',
   stopwatch: { elapsedSeconds: 0, running: false, startedAt: null, task: '', periods: [] },
   pomodoro: {
@@ -151,6 +161,7 @@ const normalizeState = (candidate: unknown): AppState => {
   return {
     ...fallback,
     theme: raw.theme === 'light' ? 'light' : 'dark',
+    palette: isPalette(raw.palette) ? raw.palette : 'slate',
     mode: raw.mode === 'pomodoro' ? 'pomodoro' : 'stopwatch',
     stopwatch: {
       elapsedSeconds: Number.isFinite(rawStopwatch.elapsedSeconds) ? Math.max(0, rawStopwatch.elapsedSeconds) : 0,
@@ -219,6 +230,8 @@ const readState = (): AppState => {
 }
 
 const hasMeaningfulData = (candidate: AppState) =>
+  candidate.theme !== 'dark' ||
+  candidate.palette !== 'slate' ||
   candidate.todos.length > 0 ||
   Object.keys(candidate.stats).length > 0 ||
   candidate.stopwatch.elapsedSeconds > 0 ||
@@ -425,6 +438,7 @@ const App = () => {
   const [cloudHydrated, setCloudHydrated] = useState(false)
   const [cloudStatus, setCloudStatus] = useState<'checking' | 'signed-out' | 'syncing' | 'synced' | 'error'>('checking')
   const [authOpen, setAuthOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const [authEmail, setAuthEmail] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
@@ -819,11 +833,17 @@ const App = () => {
     setEditingTodoTitle('')
   }
 
+  const choosePalette = (palette: Palette) => {
+    setState((current) => ({ ...current, palette }))
+    setPaletteOpen(false)
+  }
+
   const toggleTheme = () => setState((current) => ({ ...current, theme: current.theme === 'dark' ? 'light' : 'dark' }))
 
   const isStopwatchRunning = state.stopwatch.running
   const isPomodoroRunning = state.pomodoro.running
   const activeModeLabel = state.mode === 'stopwatch' ? '正计时' : state.pomodoro.phase === 'focus' ? '专注中' : '休息中'
+  const activePalette = PALETTE_OPTIONS.find((option) => option.id === state.palette) ?? PALETTE_OPTIONS[0]
   const cloudStatusLabel = !authReady
     ? '连接中'
     : !session
@@ -835,7 +855,7 @@ const App = () => {
           : '已同步'
 
   return (
-    <div className={`app-shell ${state.theme === 'light' ? 'theme-light' : 'theme-dark'}`}>
+    <div className={`app-shell theme-${state.theme} palette-${state.palette}`}>
       <header className="topbar page-width">
         <div className="brand-lockup">
           <div className="brand-mark"><Icon name="focus" size={21} /></div>
@@ -854,7 +874,7 @@ const App = () => {
             <strong>{todayStats.pomodoros}<small> 个</small></strong>
           </div>
           <div className="auth-control">
-            <button className={session ? 'sync-button connected' : 'sync-button'} type="button" onClick={() => setAuthOpen((open) => !open)}>
+            <button className={session ? 'sync-button connected' : 'sync-button'} type="button" onClick={() => { setAuthOpen((open) => !open); setPaletteOpen(false) }}>
               <span className={`sync-dot ${session ? 'active' : ''}`} />{cloudStatusLabel}
             </button>
             {authOpen && <div className="auth-popover">
@@ -877,6 +897,27 @@ const App = () => {
                   <button className="primary-button auth-submit" type="submit" disabled={authBusy}>{authBusy ? '处理中…' : '发送登录链接'}</button>
                 </form>
               )}
+            </div>}
+          </div>
+          <div className="palette-control">
+            <button className="palette-button" type="button" onClick={() => { setPaletteOpen((open) => !open); setAuthOpen(false) }} aria-haspopup="dialog" aria-expanded={paletteOpen} aria-label={`选择界面配色，当前为${activePalette.label}`}>
+              <span className={`palette-indicator ${state.palette}`} aria-hidden="true" />
+              <span className="palette-button-label">{activePalette.label}</span>
+              <Icon name="chevron" size={14} />
+            </button>
+            {paletteOpen && <div className="palette-popover" role="dialog" aria-label="选择界面配色">
+              <p className="palette-popover-title">界面配色</p>
+              <p className="palette-popover-copy">保留当前深浅模式，只调整工作时的色彩气质。</p>
+              <div className="palette-options">
+                {PALETTE_OPTIONS.map((option) => {
+                  const selected = option.id === state.palette
+                  return <button className={selected ? 'palette-option selected' : 'palette-option'} type="button" key={option.id} onClick={() => choosePalette(option.id)} aria-pressed={selected}>
+                    <span className={`palette-preview ${option.id}`} aria-hidden="true"><i /><i /><i /></span>
+                    <span className="palette-option-copy"><strong>{option.label}</strong><small>{option.description}</small></span>
+                    {selected && <span className="palette-check"><Icon name="check" size={13} /></span>}
+                  </button>
+                })}
+              </div>
             </div>}
           </div>
           <button className="icon-button" type="button" onClick={toggleTheme} aria-label="切换主题" title="切换主题">
