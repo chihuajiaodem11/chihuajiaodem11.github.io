@@ -270,9 +270,7 @@ const App = () => {
   const [cloudHydrated, setCloudHydrated] = useState(false)
   const [cloudStatus, setCloudStatus] = useState<'checking' | 'signed-out' | 'syncing' | 'synced' | 'error'>('checking')
   const [authOpen, setAuthOpen] = useState(false)
-  const [authStep, setAuthStep] = useState<'email' | 'code'>('email')
   const [authEmail, setAuthEmail] = useState('')
-  const [authCode, setAuthCode] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
   const latestStateRef = useRef(state)
@@ -447,8 +445,6 @@ const App = () => {
       email,
       options: {
         shouldCreateUser: true,
-        // Supabase falls back to its dashboard Site URL when this is omitted.
-        // Explicitly use the current site so production emails never point to localhost.
         emailRedirectTo: window.location.origin,
       },
     })
@@ -459,33 +455,7 @@ const App = () => {
       return
     }
 
-    setAuthStep('code')
-    setAuthMessage('验证码已发送，请检查邮箱；如果邮件显示确认链接，也可以直接点击链接。')
-  }
-
-  const verifyAuthCode = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const email = authEmail.trim()
-    const token = authCode.trim().replace(/\s/g, '')
-    if (!email || !token) {
-      setAuthMessage('请输入邮箱和验证码。')
-      return
-    }
-
-    setAuthBusy(true)
-    setAuthMessage('')
-    const { error } = await supabase.auth.verifyOtp({ email, token, type: 'email' })
-    setAuthBusy(false)
-
-    if (error) {
-      setAuthMessage(error.message)
-      return
-    }
-
-    setAuthOpen(false)
-    setAuthStep('email')
-    setAuthCode('')
-    setAuthMessage('')
+    setAuthMessage(`登录链接已发送至 ${email}。请在你要使用 Focusboard 的浏览器中打开邮件并点击链接。`)
   }
 
   const signOut = async () => {
@@ -700,20 +670,15 @@ const App = () => {
                   <button className="text-action" type="button" onClick={signOut}>退出登录</button>
                 </>
               ) : (
-                <form className="auth-form" onSubmit={authStep === 'email' ? sendAuthCode : verifyAuthCode}>
-                  <p className="auth-popover-title">邮箱验证码登录</p>
+                <form className="auth-form" onSubmit={sendAuthCode}>
+                  <p className="auth-popover-title">邮箱登录</p>
                   <p className="auth-popover-copy">登录后，待办、统计和计时状态会在设备间同步。</p>
                   <label>
                     <span>邮箱地址</span>
-                    <input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="name@example.com" autoComplete="email" disabled={authStep === 'code'} />
+                    <input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="name@example.com" autoComplete="email" />
                   </label>
-                  {authStep === 'code' && <label>
-                    <span>邮箱验证码</span>
-                    <input inputMode="numeric" autoComplete="one-time-code" value={authCode} onChange={(event) => setAuthCode(event.target.value)} placeholder="输入验证码" maxLength={8} autoFocus />
-                  </label>}
                   {authMessage && <p className="auth-message">{authMessage}</p>}
-                  <button className="primary-button auth-submit" type="submit" disabled={authBusy}>{authBusy ? '处理中…' : authStep === 'email' ? '发送验证码' : '验证并同步'}</button>
-                  {authStep === 'code' && <button className="text-action" type="button" onClick={() => { setAuthStep('email'); setAuthCode(''); setAuthMessage('') }}>更换邮箱</button>}
+                  <button className="primary-button auth-submit" type="submit" disabled={authBusy}>{authBusy ? '处理中…' : '发送登录链接'}</button>
                 </form>
               )}
             </div>}
