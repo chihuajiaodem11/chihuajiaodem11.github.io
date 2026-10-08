@@ -4,3 +4,4 @@ dist/
 .sites-checkout/
 .sites-checkout-*/
 *.tsbuildinfo
+focusboard-login-fix.tar.gz

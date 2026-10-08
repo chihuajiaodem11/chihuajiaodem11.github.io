@@ -32,11 +32,17 @@ interface DayStats {
   sessions: SessionRecord[]
 }
 
+interface FocusPeriod {
+  startedAt: number
+  endedAt: number
+}
+
 interface StopwatchState {
   elapsedSeconds: number
   running: boolean
   startedAt: number | null
   task: string
+  periods: FocusPeriod[]
 }
 
 interface PomodoroState {
@@ -48,6 +54,7 @@ interface PomodoroState {
   endAt: number | null
   task: string
   focusStartedAt: number | null
+  focusPeriods: FocusPeriod[]
 }
 
 interface AppState {
@@ -77,11 +84,45 @@ const dateKey = (timestamp = Date.now()) => {
   return `${date.getFullYear()}-${month}-${day}`
 }
 
+const startOfDay = (timestamp = Date.now()) => {
+  const date = new Date(timestamp)
+  date.setHours(0, 0, 0, 0)
+  return date.getTime()
+}
+
+const addLocalDays = (timestamp: number, days: number) => {
+  const date = new Date(timestamp)
+  date.setDate(date.getDate() + days)
+  date.setHours(0, 0, 0, 0)
+  return date.getTime()
+}
+
+const startOfWeek = (timestamp = Date.now()) => {
+  const date = new Date(startOfDay(timestamp))
+  const weekday = date.getDay()
+  date.setDate(date.getDate() - (weekday === 0 ? 6 : weekday - 1))
+  return date.getTime()
+}
+
+const localDayEnd = (timestamp: number) => addLocalDays(startOfDay(timestamp), 1)
+
+const normalizeFocusPeriods = (candidate: unknown): FocusPeriod[] => {
+  if (!Array.isArray(candidate)) return []
+  return candidate
+    .filter((period): period is FocusPeriod => Boolean(period && typeof period === 'object'))
+    .map((period) => ({
+      startedAt: typeof period.startedAt === 'number' ? period.startedAt : 0,
+      endedAt: typeof period.endedAt === 'number' ? period.endedAt : 0,
+    }))
+    .filter((period) => Number.isFinite(period.startedAt) && Number.isFinite(period.endedAt) && period.endedAt > period.startedAt)
+    .slice(-100)
+}
+
 const createDefaultState = (): AppState => ({
   version: 1,
   theme: 'dark',
   mode: 'stopwatch',
-  stopwatch: { elapsedSeconds: 0, running: false, startedAt: null, task: '' },
+  stopwatch: { elapsedSeconds: 0, running: false, startedAt: null, task: '', periods: [] },
   pomodoro: {
     phase: 'focus',
     focusMinutes: 25,
@@ -91,6 +132,7 @@ const createDefaultState = (): AppState => ({
     endAt: null,
     task: '',
     focusStartedAt: null,
+    focusPeriods: [],
   },
   todos: [],
   stats: {},
@@ -115,6 +157,7 @@ const normalizeState = (candidate: unknown): AppState => {
       running: rawStopwatch.running === true,
       startedAt: typeof rawStopwatch.startedAt === 'number' ? rawStopwatch.startedAt : null,
       task: typeof rawStopwatch.task === 'string' ? rawStopwatch.task : '',
+      periods: normalizeFocusPeriods(rawStopwatch.periods),
     },
     pomodoro: {
       phase: rawPomodoro.phase === 'break' ? 'break' : 'focus',
@@ -127,6 +170,7 @@ const normalizeState = (candidate: unknown): AppState => {
       endAt: typeof rawPomodoro.endAt === 'number' ? rawPomodoro.endAt : null,
       task: typeof rawPomodoro.task === 'string' ? rawPomodoro.task : '',
       focusStartedAt: typeof rawPomodoro.focusStartedAt === 'number' ? rawPomodoro.focusStartedAt : null,
+      focusPeriods: normalizeFocusPeriods(rawPomodoro.focusPeriods),
     },
     todos: rawTodos
       .filter((todo): todo is Todo => Boolean(todo && typeof todo === 'object'))
@@ -200,11 +244,35 @@ const formatDuration = (seconds: number) => {
   return remainder ? `${hours} 小时 ${remainder} 分钟` : `${hours} 小时`
 }
 
+const formatCompactDuration = (seconds: number) => {
+  const minutes = Math.floor(Math.max(0, seconds) / 60)
+  if (minutes < 1) return '—'
+  if (minutes < 60) return `${minutes}分`
+  const hours = Math.floor(minutes / 60)
+  const remainder = minutes % 60
+  return remainder ? `${hours}时${remainder}分` : `${hours}时`
+}
+
 const formatShortTime = (timestamp: number) =>
   new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(timestamp)
 
 const formatToday = () =>
   new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }).format(Date.now())
+
+const formatWeekRange = (weekStart: number) => {
+  const weekEnd = addLocalDays(weekStart, 6)
+  const start = new Date(weekStart)
+  const end = new Date(weekEnd)
+  const format = (timestamp: number, includeYear = false) => new Intl.DateTimeFormat('zh-CN', {
+    year: includeYear ? 'numeric' : undefined,
+    month: 'numeric',
+    day: 'numeric',
+  }).format(timestamp)
+  const includeYear = start.getFullYear() !== end.getFullYear()
+  return `${format(weekStart, includeYear)} — ${format(weekEnd, includeYear)}`
+}
+
+const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日']
 
 const priorityLabel: Record<Priority, string> = { low: '低', medium: '中', high: '高' }
 
@@ -235,29 +303,116 @@ const getElapsedSeconds = (timer: StopwatchState, now: number) =>
 const getRemainingSeconds = (timer: PomodoroState, now: number) =>
   timer.running && timer.endAt ? Math.max(0, Math.ceil((timer.endAt - now) / 1000)) : timer.remainingSeconds
 
+interface DailyFocusAllocation {
+  key: string
+  seconds: number
+  completedAt: number
+}
+
+const splitFocusPeriodByLocalDay = ({ startedAt, endedAt }: FocusPeriod): DailyFocusAllocation[] => {
+  const safeStart = Math.floor(startedAt)
+  const safeEnd = Math.floor(endedAt)
+  const totalMilliseconds = safeEnd - safeStart
+  const totalSeconds = Math.floor(totalMilliseconds / 1000)
+  if (totalSeconds < 1) return []
+
+  const portions: Array<{ key: string; startedAt: number; endedAt: number }> = []
+  let cursor = safeStart
+  while (cursor < safeEnd) {
+    const partEnd = Math.min(safeEnd, localDayEnd(cursor))
+    portions.push({ key: dateKey(cursor), startedAt: cursor, endedAt: partEnd })
+    cursor = partEnd
+  }
+
+  const rawSeconds = portions.map((portion) => ((portion.endedAt - portion.startedAt) / totalMilliseconds) * totalSeconds)
+  const allocatedSeconds = rawSeconds.map(Math.floor)
+  let remainingSeconds = totalSeconds - allocatedSeconds.reduce((total, seconds) => total + seconds, 0)
+  rawSeconds
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((left, right) => right.fraction - left.fraction)
+    .forEach(({ index }) => {
+      if (remainingSeconds < 1) return
+      allocatedSeconds[index] += 1
+      remainingSeconds -= 1
+    })
+
+  return portions
+    .map((portion, index) => ({
+      key: portion.key,
+      seconds: allocatedSeconds[index],
+      completedAt: Math.max(portion.startedAt, portion.endedAt - 1),
+    }))
+    .filter((portion) => portion.seconds > 0)
+}
+
 const addSessionToStats = (
   stats: Record<string, DayStats>,
   seconds: number,
   kind: TimerMode,
   label: string,
   completedAt: number,
+  periods: FocusPeriod[] = [],
 ): Record<string, DayStats> => {
-  const key = dateKey(completedAt)
-  const current = stats[key] ?? createDayStats()
-  const session: SessionRecord = { id: makeId(), kind, seconds, label: label.trim() || '无标题专注', completedAt }
-  return {
-    ...stats,
-    [key]: {
-      focusSeconds: current.focusSeconds + seconds,
-      pomodoros: current.pomodoros + (kind === 'pomodoro' ? 1 : 0),
-      sessions: [...current.sessions, session].slice(-20),
-    },
+  const safeSeconds = Math.max(0, Math.floor(seconds))
+  if (safeSeconds < 1) return stats
+
+  const allocations = periods.flatMap(splitFocusPeriodByLocalDay)
+  const recordedSeconds = allocations.reduce((total, allocation) => total + allocation.seconds, 0)
+  if (recordedSeconds < safeSeconds) {
+    allocations.push({ key: dateKey(completedAt), seconds: safeSeconds - recordedSeconds, completedAt })
+  } else if (recordedSeconds > safeSeconds) {
+    let excess = recordedSeconds - safeSeconds
+    for (let index = allocations.length - 1; index >= 0 && excess > 0; index -= 1) {
+      const reduction = Math.min(excess, allocations[index].seconds)
+      allocations[index].seconds -= reduction
+      excess -= reduction
+    }
   }
+
+  const grouped = new Map<string, DailyFocusAllocation>()
+  allocations.filter((allocation) => allocation.seconds > 0).forEach((allocation) => {
+    const existing = grouped.get(allocation.key)
+    grouped.set(allocation.key, {
+      key: allocation.key,
+      seconds: (existing?.seconds ?? 0) + allocation.seconds,
+      completedAt: Math.max(existing?.completedAt ?? 0, allocation.completedAt),
+    })
+  })
+
+  const pomodoroCompletedKey = dateKey(completedAt)
+  const sessionLabel = label.trim() || '无标题专注'
+  let nextStats = { ...stats }
+  grouped.forEach((allocation, key) => {
+    const current = nextStats[key] ?? createDayStats()
+    const session: SessionRecord = {
+      id: makeId(),
+      kind,
+      seconds: allocation.seconds,
+      label: sessionLabel,
+      completedAt: allocation.completedAt,
+    }
+    nextStats[key] = {
+      focusSeconds: current.focusSeconds + allocation.seconds,
+      pomodoros: current.pomodoros + (kind === 'pomodoro' && key === pomodoroCompletedKey ? 1 : 0),
+      sessions: [...current.sessions, session].slice(-20),
+    }
+  })
+
+  if (kind === 'pomodoro' && !grouped.has(pomodoroCompletedKey)) {
+    const current = nextStats[pomodoroCompletedKey] ?? createDayStats()
+    nextStats = {
+      ...nextStats,
+      [pomodoroCompletedKey]: { ...current, pomodoros: current.pomodoros + 1 },
+    }
+  }
+
+  return nextStats
 }
 
 const App = () => {
   const [state, setState] = useState<AppState>(() => readState())
   const [now, setNow] = useState(() => Date.now())
+  const [weekOffset, setWeekOffset] = useState(0)
   const [todoFilter, setTodoFilter] = useState<TodoFilter>('all')
   const [todoDraft, setTodoDraft] = useState('')
   const [todoPriority, setTodoPriority] = useState<Priority>('medium')
@@ -388,9 +543,12 @@ const App = () => {
       if (!active.running || !active.endAt || now < active.endAt) return current
       if (active.phase === 'focus') {
         const completedAt = now
+        const focusPeriods = active.focusStartedAt
+          ? [...active.focusPeriods, { startedAt: active.focusStartedAt, endedAt: completedAt }]
+          : active.focusPeriods
         return {
           ...current,
-          stats: addSessionToStats(current.stats, active.focusMinutes * 60, 'pomodoro', active.task, completedAt),
+          stats: addSessionToStats(current.stats, active.focusMinutes * 60, 'pomodoro', active.task, completedAt, focusPeriods),
           pomodoro: {
             ...active,
             phase: 'break',
@@ -398,6 +556,7 @@ const App = () => {
             endAt: completedAt + active.breakMinutes * 60 * 1000,
             remainingSeconds: active.breakMinutes * 60,
             focusStartedAt: null,
+            focusPeriods: [],
           },
         }
       }
@@ -410,6 +569,7 @@ const App = () => {
           endAt: null,
           remainingSeconds: active.focusMinutes * 60,
           focusStartedAt: null,
+          focusPeriods: [],
         },
       }
     })
@@ -417,6 +577,25 @@ const App = () => {
 
   const today = dateKey(now)
   const todayStats = state.stats[today] ?? createDayStats()
+  const todayStart = startOfDay(now)
+  const currentWeekStart = startOfWeek(now)
+  const selectedWeekStart = addLocalDays(currentWeekStart, weekOffset * 7)
+  const weekDays = useMemo(() => Array.from({ length: 7 }, (_, index) => {
+    const timestamp = addLocalDays(selectedWeekStart, index)
+    const stats = state.stats[dateKey(timestamp)] ?? createDayStats()
+    return {
+      timestamp,
+      stats,
+      isToday: timestamp === todayStart,
+      isFuture: timestamp > todayStart,
+    }
+  }), [selectedWeekStart, state.stats, todayStart])
+  const weekFocusSeconds = weekDays.reduce((total, day) => total + day.stats.focusSeconds, 0)
+  const weekPomodoros = weekDays.reduce((total, day) => total + day.stats.pomodoros, 0)
+  const availableDays = weekOffset === 0 ? Math.max(1, weekDays.filter((day) => !day.isFuture).length) : 7
+  const weekAverageSeconds = Math.floor(weekFocusSeconds / availableDays)
+  const maximumDaySeconds = Math.max(1, ...weekDays.map((day) => day.stats.focusSeconds))
+  const isCurrentWeek = weekOffset === 0
   const stopwatchSeconds = getElapsedSeconds(state.stopwatch, now)
   const pomodoroSeconds = getRemainingSeconds(state.pomodoro, now)
   const visibleTodos = useMemo(() => state.todos.filter((todo) => {
@@ -475,26 +654,34 @@ const App = () => {
   const pauseStopwatch = () => {
     setState((current) => {
       if (!current.stopwatch.running) return current
-      const elapsedSeconds = getElapsedSeconds(current.stopwatch, Date.now())
-      return { ...current, stopwatch: { ...current.stopwatch, elapsedSeconds, running: false, startedAt: null } }
+      const pausedAt = Date.now()
+      const elapsedSeconds = getElapsedSeconds(current.stopwatch, pausedAt)
+      const periods = current.stopwatch.startedAt
+        ? [...current.stopwatch.periods, { startedAt: current.stopwatch.startedAt, endedAt: pausedAt }]
+        : current.stopwatch.periods
+      return { ...current, stopwatch: { ...current.stopwatch, elapsedSeconds, periods, running: false, startedAt: null } }
     })
   }
 
   const finishStopwatch = () => {
     setState((current) => {
-      const elapsedSeconds = getElapsedSeconds(current.stopwatch, Date.now())
+      const completedAt = Date.now()
+      const elapsedSeconds = getElapsedSeconds(current.stopwatch, completedAt)
       if (elapsedSeconds < 1) return current
+      const periods = current.stopwatch.startedAt
+        ? [...current.stopwatch.periods, { startedAt: current.stopwatch.startedAt, endedAt: completedAt }]
+        : current.stopwatch.periods
       return {
         ...current,
-        stats: addSessionToStats(current.stats, elapsedSeconds, 'stopwatch', current.stopwatch.task, Date.now()),
-        stopwatch: { ...current.stopwatch, elapsedSeconds: 0, running: false, startedAt: null },
+        stats: addSessionToStats(current.stats, elapsedSeconds, 'stopwatch', current.stopwatch.task, completedAt, periods),
+        stopwatch: { ...current.stopwatch, elapsedSeconds: 0, periods: [], running: false, startedAt: null },
       }
     })
   }
 
   const resetStopwatch = () => setState((current) => ({
     ...current,
-    stopwatch: { ...current.stopwatch, elapsedSeconds: 0, running: false, startedAt: null },
+    stopwatch: { ...current.stopwatch, elapsedSeconds: 0, periods: [], running: false, startedAt: null },
   }))
 
   const startPomodoro = () => {
@@ -510,7 +697,7 @@ const App = () => {
           ...pomodoro,
           running: true,
           endAt: startedAt + duration * 1000,
-          focusStartedAt: pomodoro.phase === 'focus' ? (pomodoro.focusStartedAt ?? startedAt) : pomodoro.focusStartedAt,
+          focusStartedAt: pomodoro.phase === 'focus' ? startedAt : pomodoro.focusStartedAt,
         },
       }
     })
@@ -520,13 +707,19 @@ const App = () => {
     setState((current) => {
       const pomodoro = current.pomodoro
       if (!pomodoro.running) return current
+      const pausedAt = Date.now()
+      const focusPeriods = pomodoro.phase === 'focus' && pomodoro.focusStartedAt
+        ? [...pomodoro.focusPeriods, { startedAt: pomodoro.focusStartedAt, endedAt: pausedAt }]
+        : pomodoro.focusPeriods
       return {
         ...current,
         pomodoro: {
           ...pomodoro,
           running: false,
           endAt: null,
-          remainingSeconds: getRemainingSeconds(pomodoro, Date.now()),
+          remainingSeconds: getRemainingSeconds(pomodoro, pausedAt),
+          focusStartedAt: pomodoro.phase === 'focus' ? null : pomodoro.focusStartedAt,
+          focusPeriods,
         },
       }
     })
@@ -541,6 +734,7 @@ const App = () => {
       running: false,
       endAt: null,
       focusStartedAt: null,
+      focusPeriods: [],
     },
   }))
 
@@ -558,6 +752,7 @@ const App = () => {
         running: false,
         endAt: null,
         focusStartedAt: null,
+        focusPeriods: [],
       },
     }))
   }
@@ -578,6 +773,7 @@ const App = () => {
         running: false,
         endAt: null,
         focusStartedAt: null,
+        focusPeriods: [],
       },
     }))
   }
@@ -830,10 +1026,44 @@ const App = () => {
         <section className="panel stats-panel">
           <div className="panel-header stats-header">
             <div>
-              <p className="section-label">今天的进度</p>
+              <p className="section-label">专注回顾</p>
               <h2>专注统计</h2>
             </div>
             <span className="panel-kicker">{session ? `已登录 · ${cloudStatusLabel}` : '未登录 · 仅保存在当前设备'}</span>
+          </div>
+          <div className="weekly-overview" aria-labelledby="weekly-heading">
+            <div className="weekly-overview-header">
+              <div>
+                <p className="weekly-kicker">{isCurrentWeek ? '本周概览' : '历史记录'}</p>
+                <h3 id="weekly-heading">{isCurrentWeek ? '这一周的专注节奏' : '这一周的专注回顾'}</h3>
+              </div>
+              <div className="week-navigation" aria-label="切换统计周">
+                <button className="week-nav-button previous" type="button" onClick={() => setWeekOffset((offset) => offset - 1)} aria-label="查看上一周" title="上一周">
+                  <Icon name="arrow" size={15} />
+                </button>
+                <span className="week-range">{formatWeekRange(selectedWeekStart)}</span>
+                <button className="week-nav-button" type="button" onClick={() => setWeekOffset((offset) => Math.min(0, offset + 1))} disabled={isCurrentWeek} aria-label="查看下一周" title="下一周">
+                  <Icon name="arrow" size={15} />
+                </button>
+              </div>
+            </div>
+            <div className="weekly-metrics">
+              <div className="weekly-metric primary-weekly-metric"><span>{isCurrentWeek ? '本周累计' : '当周累计'}</span><strong>{formatDuration(weekFocusSeconds)}</strong></div>
+              <div className="weekly-metric"><span>完成番茄钟</span><strong>{weekPomodoros}<small> 个</small></strong></div>
+              <div className="weekly-metric"><span>日均专注</span><strong>{formatDuration(weekAverageSeconds)}</strong></div>
+            </div>
+            <div className="week-chart" role="img" aria-label={`${formatWeekRange(selectedWeekStart)}，累计专注 ${formatDuration(weekFocusSeconds)}，完成 ${weekPomodoros} 个番茄钟`}>
+              {weekDays.map((day, index) => {
+                const barHeight = day.isFuture || day.stats.focusSeconds < 1 ? 0 : Math.max(8, Math.round((day.stats.focusSeconds / maximumDaySeconds) * 100))
+                const dayLabel = `周${WEEKDAY_LABELS[index]}`
+                return <div className={`week-day${day.isToday ? ' today' : ''}${day.isFuture ? ' future' : ''}`} key={day.timestamp} title={`${dayLabel} · ${day.isFuture ? '尚未开始' : formatDuration(day.stats.focusSeconds)}`}>
+                  <span className="week-day-value">{day.isFuture ? '—' : formatCompactDuration(day.stats.focusSeconds)}</span>
+                  <div className="week-bar-track">{barHeight > 0 && <div className="week-bar" style={{ height: `${barHeight}%` }} />}</div>
+                  <span className="week-day-label">{WEEKDAY_LABELS[index]}</span>
+                </div>
+              })}
+            </div>
+            {weekFocusSeconds === 0 && <p className="week-empty">这一周还没有完成的专注记录。</p>}
           </div>
           <div className="stats-layout">
             <div className="stat-cards">
