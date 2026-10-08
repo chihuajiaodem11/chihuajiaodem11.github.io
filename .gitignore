@@ -5,3 +5,4 @@ dist/
 .sites-checkout-*/
 *.tsbuildinfo
 focusboard-login-fix.tar.gz
+focusboard-weekly-stats.tar.gz
