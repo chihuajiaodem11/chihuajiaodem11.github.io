@@ -4,5 +4,8 @@ dist/
 .sites-checkout/
 .sites-checkout-*/
 *.tsbuildinfo
+.env
+.env.*
+!.env.example
 focusboard-login-fix.tar.gz
 focusboard-weekly-stats.tar.gz
